@@ -1,0 +1,375 @@
+---
+title: "PGA_SNV_hg38_07.25 - Panel-Gene SNV analysis for hg38 builds"
+author: "Layla Ahmed, Erika Tavares"
+date: "2025-06-24"
+output: html_document  
+---  
+
+```{r}
+ messages <- c(
+    "You are currently using the Single Nucleotide Variant (SNV) filter code specifically for Whole Genome Analysis.",
+    "If you want to specifically look for panel genes in your file, please go to PGA_SNV_hg38",
+    "If you are starting from the original TCAG file, import it with the command below.",
+    "If you want to replace or add  MPO and HPO terms, add them in c('vision', 'eye') on lines 317 and 323 "
+  )
+  
+  # Loop through and print each with a pause
+  for (msg in messages) {
+    cat(msg, "\n")
+    Sys.sleep(2)  # Adjust seconds to your p reference
+  }
+  
+  # Helper function for CRAN packages
+  install_and_load <- function(pkg) {
+    if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+      install.packages(pkg)
+      library(pkg, character.only = TRUE)
+    } else {
+      library(pkg, character.only = TRUE)
+    }
+  }
+  
+  
+  install_and_load_bioc <- function(pkg) {
+    if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+      if (!require("BiocManager", quietly = TRUE)) {
+        install.packages("BiocManager")
+        library(BiocManager)
+      }
+      BiocManager::install(pkg)
+      library(pkg, character.only = TRUE)
+    } else {
+      library(pkg, character.only = TRUE)
+    }
+  }   
+  
+  
+  
+  # CRAN packages
+  cran_packages <- c(
+    "data.table",
+    "conflicted",
+    "tidyverse",
+    "writexl",
+    "dplyr",
+    "readr",
+    "readxl",
+    "openxlsx"
+  )
+  
+  # Bioconductor packages
+  bioc_packages <- c(
+    "AnnotationDbi",
+    "org.Hs.eg.db"
+  )
+  
+  # Install and load CRAN packages
+  lapply(cran_packages, install_and_load)
+  
+  # Install and load Bioconductor packages
+  lapply(bioc_packages, install_and_load_bioc)
+  
+ ##### Block to import file#########################################
+  #Main
+  print('Input patient file')
+  fileName = file.choose()
+  if(!tolower(data.table::last(unlist(strsplit(fileName,'\\.'))))%in%c('tsv','csv','txt','dsv')){
+    stop("Unsupported file format",call. = F)
+  }
+  outName = sub("\\..*$", "", basename(fileName))
+  time_elapsed = proc.time()
+  repTimes = length(strsplit(readLines(fileName, n=1),','))
+  currentdata = fread(fileName,colClasses = rep('character',repTimes),na.strings="NA",data.table=F)
+  names(currentdata) = sapply(strsplit(names(currentdata),'\\:'),function(i){i[[length(i)]]})
+  numLines = nrow(currentdata)
+  print(paste('Initial row count:',nrow(currentdata)))
+  
+  if ("spliceAI_DS_AL" %in% colnames(currentdata)){
+    currentdata$sAI_delta = as.numeric(currentdata$'spliceAI_DS_AG')+ as.numeric(currentdata$'spliceAI_DS_AL')+ as.numeric(currentdata$'spliceAI_DS_DG')+as.numeric(currentdata$'spliceAI_DS_DL')
+    currentdata$sAI_delta <- currentdata$sAI_delta %>% replace(is.na(.), 0)
+  }
+  
+  if ("promoterAI_score"%in% colnames(currentdata)) {
+    currentdata$promoterAInum = suppressWarnings(as.numeric(currentdata$promoterAI_score))
+    currentdata$promoterAInum <- currentdata$promoterAInum %>% replace(is.na(.), 0)
+  }
+  
+ FilterStep <- list(
+    Step = character(0),  # Empty character vector for Step names
+    Count = numeric(0)    # Empty numeric vector for Count values
+  )
+  
+  #For maths later on
+  count_removed_and_remaining_rows <- function(modified_data) {
+    removed_rows <- numLines - nrow(modified_data)
+    remaining_rows <- nrow(modified_data)
+    #Apparently dplyr and datatable have last as a function so i just changed it to lastlast (now everybody go chop breakfast)
+    lastlast <- function(x){x[[length(x)]]}
+    
+    cat(paste("This action removed", removed_rows, "rows.\n"))
+    cat(paste("There are currently", remaining_rows, "rows remaining.\n"))
+  }
+  
+  allDups = function(value){duplicated(value) | duplicated(value, fromLast = TRUE)} 
+    
+  
+  InitialRow <- nrow(currentdata)
+  InitialText <- "Initial Number of Variants"
+  FilterStep$Step <- c(InitialText)
+  FilterStep$Count <- c(InitialRow)
+ 
+  
+  
+  names(currentdata) <- make.names(names(currentdata), unique = TRUE)
+
+  
+
+   cat("Quality filtering will now commence!\n")
+    #Filter FILTER = PASS; all variants that pass the filter check
+    cat("Filtering for variants that PASS the filter check.\n")
+    currentdata <- currentdata[currentdata$FILTER%in%'PASS',]
+    count_removed_and_remaining_rows(currentdata)
+    
+      currentdata$newDP <- as.numeric(currentdata$AD_ALT)+as.numeric(currentdata$AD_REF)
+      currentdata <- currentdata[as.numeric(currentdata$newDP)>=7,]
+    currentdata <- currentdata[as.numeric(currentdata$newDP)<=120,]
+    Quality_Row <- nrow(currentdata)
+    Quality_Text <- "Quality Filter: FILTER = PASS & 7 > Depth > 120"
+    count_removed_and_remaining_rows(currentdata)
+    
+    FilterStep$Step <- c(FilterStep$Step, Quality_Text)
+    FilterStep$Count <- c(FilterStep$Count, Quality_Row)
+    #wb <- openxlsx::createWorkbook()
+    #sheet_name <<- as.character("Quality_Filtered_Variants")
+    # addWorksheet(wb, sheet_name)
+    # final_file <- paste0(Dnumber, "_qualityfilter.xlsx")
+    # writeData(wb, sheet = sheet_name, x = currentdata)
+    # Save the Excel file
+    # saveWorkbook(wb, file = final_file)
+    
+ 
+  
+  
+  ## 0.5% Filtering of Population #
+  
+
+    cat("Population filtering will now commence!\n")
+  
+    #Filter A1000g_freq_max
+    if ("A1000g_freq_max"%in% colnames(currentdata)) {
+      currentdata = currentdata[as.numeric(currentdata[,'A1000g_freq_max'])<=0.005,]}
+   
+    
+    #Filter gnomadV4_exome_fafmax_faf95_max
+    if ("gnomadV4_exome_fafmax_faf95_max"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_exome_fafmax_faf95_max'])<=0.005,]} 
+   
+    #Filter gnomadV4_gnomadV4_exome_AF_grpmax
+    if ("gnomadV4_exome_AF_grpmax"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_exome_AF_grpmax'])<=0.005,]}
+   
+    
+    
+    #gnomadV4_genome_fafmax_faf95_max
+    if ("gnomadV4_genome_fafmax_faf95_max"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_genome_fafmax_faf95_max'])<=0.005,]}
+    
+    
+    #gnomadV4_genome_AF_grpmax
+    if ("gnomadV4_genome_AF_grpmax"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_genome_AF_grpmax'])<=0.005,]}
+   
+    
+    #hsint_AF_all
+    if ("hsint_AF_all"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'hsint_AF_all'])<=0.01,]} 
+   
+    
+    #hsint_AF_EUR
+    if ("hsint_AF_EUR"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'hsint_AF_EUR'])<=0.01,]}
+    
+    
+    #gnomadV4_exome_AF_remaining
+    if ("gnomadV4_exome_AF_remaining"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_exome_AF_remaining'])<=0.005,]}
+    
+    
+    #gnomadV4_genome_AF_remaining
+    if ("gnomadV4_genome_AF_remaining"%in% colnames(currentdata)) {currentdata = currentdata[as.numeric(currentdata[,'gnomadV4_genome_AF_remaining'])<=0.005,]}
+    
+    
+    #filter out variants with >7 homozygous counts in gnomAD exome or genome
+    if ("gnomadV4_genome_nhomalt"%in%colnames (currentdata)) {currentdata = currentdata[(as.numeric(currentdata[,'gnomadV4_genome_nhomalt']))  <= 7,]}
+    
+    
+    if ("gnomadV4_exome_nhomalt"%in%colnames (currentdata)) {currentdata = currentdata[(as.numeric(currentdata[,'gnomadV4_exome_nhomalt']))  <= 7,]}
+        
+    
+    count_removed_and_remaining_rows(currentdata)
+    RareRow <- nrow(currentdata)
+    RareText <- " Frequency Filtering (1000 Genomes & gnomAD <= 0.05%)"
+    FilterStep$Step <- c(FilterStep$Step, RareText)
+    FilterStep$Count <- c(FilterStep$Count, RareRow)
+
+#open panel and read
+print('Input gene panel file')
+fileName = file.choose()
+print(fileName)
+if(!tolower(data.table::last(unlist(strsplit(fileName,'\\.'))))%in%c('tsv','csv','txt','dsv')){
+  stop("Unsupported file format",call. = F)
+} 
+panel = read.table(fileName, header=T, colClasses = "character")
+#count number of entries
+nrowpanel <- nrow(panel)
+print(paste('Number of panel genes:',nrowpanel))
+panel
+#filter tab with panel
+currentdata = currentdata[currentdata$gene_symbol%in%panel[1:nrowpanel,],]
+
+
+
+
+  currentdata$VariantScore <- 0
+  user_cutoffs <- list(
+    
+    # sift_scorecutoff = 0.05,
+   # polyphen_scorecutoff = 0.8,
+    #ma_scorecutoff = 2,
+    spx_dpsicutoff = 2,
+    phylopPMam_avgcutoff = 1.5,
+    phylopVert100_avgcutoff = 4,
+    PROVEAN_scorecutoff = -2.5,
+    CADD_phredcutoff = 15,
+    alpha_missense_scorecuttoff = 0.8,
+    primateai3d_scorecuttoff = 0.8,
+    MPC_scorecutoff = 2,
+    REVEL_cutoff = 0.5
+  )
+  
+  
+#  # Check and rename duplicate column names
+#  dup_cols <- which(duplicated(names(panel_filtered_data)))
+#  if (length(dup_cols) > 0) {
+#    names(panel_filtered_data)[dup_cols] <- paste(names(panel_filtered_data)[dup_cols], seq_along(dup_cols), #sep = "_")
+#  }
+  
+  # Calculate full cutoff scores
+  predVote = suppressWarnings(cbind(
+    #as.numeric(currentdata$sift_score) <= user_cutoffs$sift_scorecutoff, 
+    #as.numeric(currentdata$polyphen_score) >= user_cutoffs$polyphen_scorecutoff, 
+    #as.numeric(currentdata$ma_score) >= user_cutoffs$ma_scorecutoff,
+    abs(as.numeric(currentdata$spx_dpsi)) <= user_cutoffs$spx_dpsicutoff,
+    as.numeric(currentdata$phylopMam_avg) >= user_cutoffs$phylopPMam_avgcutoff,
+    as.numeric(currentdata$phylopVert100_avg) >= user_cutoffs$phylopVert100_avgcutoff,
+    as.numeric(currentdata$PROVEAN_score) <= user_cutoffs$PROVEAN_scorecutoff,
+    as.numeric(currentdata$CADD_phred) >= user_cutoffs$CADD_phredcutoff,
+    as.numeric(currentdata$alpha_missense) >= user_cutoffs$alpha_missensecutoff,
+    as.numeric(currentdata$primateai3d) >= user_cutoffs$primateai3dcutoff,
+    as.numeric(currentdata$MPC_score) >= user_cutoffs$MPC_scorecutoff,
+    as.numeric(currentdata$CADD_phred) >= user_cutoffs$CADD_phredcutoff,
+    as.numeric(currentdata$REVEL_score) >= user_cutoffs$REVEL_cutoff)
+    )
+  
+  panel_filtered_data = currentdata
+  # Assign full scores
+  panel_filtered_data$ind <- rowSums(predVote, na.rm = TRUE)
+  
+  panel_filtered_data$VariantScore <- panel_filtered_data$ind
+
+  if ("Clinvar_SIG" %in% colnames(panel_filtered_data)) {
+ for (i in 1:nrow(panel_filtered_data)) {
+  if (grepl("Pathogenic", panel_filtered_data$Clinvar_SIG[i], ignore.case = TRUE)) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 30
+    print("Score updated for pathogenic variant!")
+  } else if (grepl("Conflicting", panel_filtered_data$Clinvar_SIG[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 2
+     print("Score updated for conflicting variant!")
+  } else if (grepl("Uncertain", panel_filtered_data$Clinvar_SIG[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 2
+     print("Score updated for uncertain variant!")
+  } 
+ }
+}
+if ("effect_priority" %in% colnames(panel_filtered_data)) {
+ for (i in 1:nrow(panel_filtered_data)) {
+  if (grepl("frameshift", panel_filtered_data$effect_priority[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 15
+  }
+   if (grepl("stopgain", panel_filtered_data$effect_priority[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 15
+  }
+   if (grepl("startloss", panel_filtered_data$effect_priority[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 5
+   }
+   if (grepl("stoploss", panel_filtered_data$effect_priority[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 5
+   }
+   if (grepl("inframe", panel_filtered_data$effect_priority[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 5
+   }
+ }
+}
+
+if ("sAI_delta" %in% colnames(panel_filtered_data)) {
+ for (i in 1:nrow(panel_filtered_data)) {
+ if (any(panel_filtered_data$sAI_delta >= 0.2, na.rm = TRUE)) {
+  panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 1
+} else if (any(panel_filtered_data$sAI_delta >= 0.1, na.rm = TRUE)) {
+  panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 0.5
+}
+ }
+}
+  # 6. MPO column
+  MPO <- c('vision', 'eye')
+  if (grepl(paste(MPO, collapse = "|"), panel_filtered_data$MPO[i])) {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 1
+  }
+
+  # 7. HPO column
+  HPO <- c('vision', 'eye')
+  if (grepl(paste(HPO, collapse = "|"), panel_filtered_data$HPO[i]))  {
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 1
+  }
+  
+ # 8.FANTOM5 
+  if  ("Fantom5DPI" %in% colnames(panel_filtered_data) &&
+         any(currentdata$Fantom5DPI == 2, na.rm = TRUE)) { 
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i] + 0.5
+  }
+  
+  # 9.PromoterAI
+  if ("promoterAI" %in% colnames(panel_filtered_data) &&
+      any(abs(as.numeric(panel_filtered_data$promoterAInum)) > 0.1, na.rm = TRUE)) { 
+    panel_filtered_data$VariantScore[i] <- panel_filtered_data$VariantScore[i]  + 0.5
+      }  
+  
+  panel_filtered_data <- panel_filtered_data[order(-panel_filtered_data$VariantScore), ]
+
+ FilterRows <- data.frame(
+  Step = FilterStep$Step,
+  Count = FilterStep$Count,
+  stringsAsFactors = FALSE
+)  
+  
+  wb <- createWorkbook()
+  sheet_name_all <- as.character("panel_filtered_data")
+  sheet_name_snv <- as.character("PanelSNV_Filter_History")
+  addWorksheet(wb, sheet_name_all)
+  addWorksheet(wb, sheet_name_snv)
+  final_file <- paste0(outName, "_panel_variants.xlsx")
+  writeData(wb, sheet = sheet_name_all, x = panel_filtered_data)
+  writeData(wb, sheet = sheet_name_snv, x = FilterRows)
+  # Save the Excel file
+  if (file.exists(final_file)) {
+    counter <- 1
+    dup_file <- paste0(outName, "_", counter, "_panel_variants.xlsx")
+    
+    while (file.exists(dup_file)) {
+      counter <- counter + 1
+      dup_file <- paste0(outName,"_", counter, "_panel_variants.xlsx")
+    }
+    saveWorkbook(wb, file = dup_file)
+    cat(paste0("File saved as '", dup_file, "'.\n"))
+  } else {
+    saveWorkbook(wb, file = final_file)
+    paste0(final_file, "saved successfully!\n")
+    
+  }
+  
+
+```
+

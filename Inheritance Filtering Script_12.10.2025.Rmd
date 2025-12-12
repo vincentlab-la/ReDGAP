@@ -1,15 +1,16 @@
 ---
 title: "Inheritance Filtering"
-author: "Layla Ahmed"
-date: "2025-05-20"
+author: "Layla Ahmed and Erika Tavares"
+date: "2025-12-09"
 output: html_document
 ---
 
 
 ```{r}
 
-#You are currently using the Inheritance Filtering script; this script is designed to utilize gene names for matching variants. Note that you will need a column called "gene_symbol" for this; if you do not have this column name, edit your data before running this.
+#You are currently using the Inheritance Filtering script; this script is designed to utilize gene names for matching variants. Note that you will need a column called "gene_symbol" for this; if you do not have this column name, edit your data before running this.Use | to separate gene names for variants overlapping multiple genes.
 #This script can also be used for identifying genes shared between affected family members, provided the user analyses the resulting data for specific variant matches as shared genes are saved in their entire.
+
 count_removed_and_remaining_rows <<- function(original_data, modified_data) {
   removed_rows <- nrow(original_data) - nrow(modified_data)
   remaining_rows <- nrow(modified_data)
@@ -69,7 +70,7 @@ stats_data <<- data.frame()
 Data_Input <- function() {
   full_sheet_list <- list()
 sheet_names <- list()
-Dnumber <<- as.character(readline(prompt ="Please write the Sample Number:"))
+Dnumber <<- as.character(readline(prompt ="Please write the Sample ID:"))
 
 #function to rerun the spreadsheet choosing bit if necessary
 reloadfun <- function() {
@@ -262,7 +263,13 @@ find_recessive_candidates <- function(wb) {
     
     # 1. Check for duplicate genes
     if("gene_symbol" %in% colnames(current_sheet)) {
-      gene_counts <- table(current_sheet$gene_symbol)
+     # Ensure column is character
+  current_sheet$gene_symbol <- as.character(current_sheet$gene_symbol)
+  
+  current_sheet$gene_symbol_split <- strsplit(current_sheet$gene_symbol, "\\|")
+  genes_expanded <- unlist(current_sheet$gene_symbol_split)
+
+      gene_counts <- table(genes_expanded)
       duplicate_genes <- names(gene_counts[gene_counts > 1])
       
       if(length(duplicate_genes) > 0) {
@@ -317,21 +324,48 @@ find_recessive_candidates <- function(wb) {
   library(dplyr)
   
   # Calculate per-gene aggregate scores
+
+  
   gene_scores <- recessive_candidates %>%
-    group_by(gene_symbol) %>%
-    summarise(
-      GeneScore_AvgAll = mean(VariantScore, na.rm = TRUE),
-      GeneScore_AvgTop2 = mean(sort(VariantScore, decreasing = TRUE)[1:min(2, n())], na.rm = TRUE)
-    )
+  separate_rows(gene_symbol, sep = "\\|") %>%   # <-- split gene symbols
+  group_by(gene_symbol) %>%
+  summarise(
+    GeneScore_AvgAll = mean(VariantScore, na.rm = TRUE),
+    GeneScore_AvgTop2 = mean(sort(VariantScore, decreasing = TRUE)[1:min(2, n())], 
+                             na.rm = TRUE),
+    .groups = "drop"
+  )
   
   # Merge back to each row by gene_symbol
-  recessive_candidates <- recessive_candidates %>%
-    left_join(gene_scores, by = "gene_symbol")
-  
-  cat("Gene scores attached beside each variant row for recessive genes in", current_name, "\n")
-}
+
+#
+  # Drop problematic list-columns (like gene_symbol_split)
+recessive_candidates <- recessive_candidates %>%
+  dplyr::select(where(~ !is.list(.)))
+
+gene_map <- recessive_candidates %>%
+  mutate(row_id = row_number()) %>%
+  separate_rows(gene_symbol, sep = "\\|")
+
+gene_scores <- gene_map %>%
+  group_by(gene_symbol) %>%
+  summarise(
+    GeneScore_AvgAll = mean(VariantScore, na.rm = TRUE),
+    GeneScore_AvgTop2 = mean(sort(VariantScore, decreasing = TRUE)[1:min(2, n())],
+                             na.rm = TRUE),
+    .groups = "drop"
+  )
+
+recessive_candidates <- gene_map %>%
+  left_join(gene_scores, by = "gene_symbol") %>%
+  group_by(row_id) %>%
+  summarise(
+    across(everything(), ~ dplyr::first(.[!is.na(.)])),
+    .groups = "drop"
+  ) %>%
+  dplyr::select(-row_id)
     
-    
+    }   
     # Add statistics for original sheet
     original_genes <- if("gene_symbol" %in% colnames(current_sheet)) current_sheet$gene_symbol else character(0)
     add_to_stats(current_name, "Original", nrow(current_sheet), 0, original_genes, "Original input data")
@@ -369,12 +403,17 @@ find_enhanced_matches <- function(wb) {
   if (length(full_sheet_list) > 1) {
     
     find_intersection <- function(sheet_i, sheet_j) {
-      if ("gene_symbol" %in% colnames(sheet_i) && "gene_symbol" %in% colnames(sheet_j)) {
-        return(base::intersect(sheet_i$gene_symbol, sheet_j$gene_symbol))
-      } else {
-        return(character(0))
-      }
-    } 
+  if ("gene_symbol" %in% colnames(sheet_i) && "gene_symbol" %in% colnames(sheet_j)) {
+    
+    genes_i <- unique(unlist(strsplit(sheet_i$gene_symbol, "\\|")))
+    genes_j <- unique(unlist(strsplit(sheet_j$gene_symbol, "\\|")))
+    
+    return(base::intersect(genes_i, genes_j))
+    
+  } else {
+    return(character(0))
+  }
+}
     
     # Perform intersections for all combinations of data frames
     for (i in 1:(length(full_sheet_list) - 1)) {
@@ -397,33 +436,40 @@ find_enhanced_matches <- function(wb) {
         cat("There are", length(matches), "gene matches between", sheet_names[[i]], "and", sheet_names[[j]], ".\n")
         
         # Get the matching rows
-        sheet_i_matches <- full_sheet_list[[i]][full_sheet_list[[i]]$gene_symbol %in% matches, ]
-        sheet_j_matches <- full_sheet_list[[j]][full_sheet_list[[j]]$gene_symbol %in% matches, ]
-        
-        sheet_i_matches$SourceSheet <- sheet_names[[i]]
-        sheet_j_matches$SourceSheet <- sheet_names[[j]]
-        
-        # Ensure columns exist for grouping
-        if ("CHROM" %in% colnames(sheet_i_matches) && "SV_Start" %in% colnames(sheet_i_matches) && "SV_Stop" %in% colnames(sheet_i_matches)) {
-          
-          sheet_i_matches <<- sheet_i_matches %>%
-            group_by(CHROM, SV_Start, SV_Stop) %>%
-            summarise(
-              gene_symbol = paste(unique(gene_symbol), collapse = ","),
-              across(everything(), ~ dplyr::first(.)),
-              .groups = "drop"
-            )
-        }
-        
-         if ("CHROM" %in% colnames(sheet_j_matches) && "SV_Start" %in% colnames(sheet_j_matches) && "SV_Stop" %in% colnames(sheet_j_matches)) {
-          sheet_j_matches <<- sheet_j_matches %>%
-            group_by(CHROM, SV_Start, SV_Stop) %>%
-            summarise(
-              gene_symbol = paste(unique(gene_symbol), collapse = ","),
-              across(everything(), ~ dplyr::first(.)),
-              .groups = "drop"
-            )
-        }
+        expand_genes <- function(df) {
+  df %>%
+    mutate(row_id = row_number()) %>%
+    tidyr::separate_rows(gene_symbol, sep = "\\|")
+}
+
+# Expand both sheets
+expanded_i <- expand_genes(full_sheet_list[[i]])
+expanded_j <- expand_genes(full_sheet_list[[j]])
+
+# Find matching row IDs (deduplicated)
+sheet_i_ids <- unique(expanded_i$row_id[expanded_i$gene_symbol %in% matches])
+sheet_j_ids <- unique(expanded_j$row_id[expanded_j$gene_symbol %in% matches])
+
+# Pull original rows
+sheet_i_matches <- full_sheet_list[[i]][sheet_i_ids, ]
+sheet_j_matches <- full_sheet_list[[j]][sheet_j_ids, ]
+
+sheet_i_matches$SourceSheet <- sheet_names[[i]]
+sheet_j_matches$SourceSheet <- sheet_names[[j]]
+
+# Group if structure supports it
+if (all(c("CHROM", "SV_Start", "SV_Stop") %in% names(sheet_i_matches))) {
+  sheet_i_matches <- sheet_i_matches %>%
+    group_by(CHROM, SV_Start, SV_Stop) %>%
+    summarise(
+      gene_symbol = paste(unique(gene_symbol), collapse = ","),
+      across(everything(), ~ dplyr::first(.)),
+      .groups = "drop"
+    )
+}
+
+
+
         
         # Workbook sheet names
         comparison_name <- paste0(sheet_names[[i]], "_vs_", sheet_names[[j]])
